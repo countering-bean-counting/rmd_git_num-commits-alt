@@ -1,0 +1,281 @@
+---
+title: "Git Log Authors Network Experiment 1"
+author: "Augustina Ragwitz"
+date: "September 22, 2017"
+output: html_document
+params:
+  git_url: "git@github.com:rladies/starter-kit.git"
+  git_repo: "starter-kit"
+  git_path: "data/gitlog_authors_1"
+  gitlog_sha: ''
+  gitlog_out: 'rladies_starter-kit.txt'
+  gh_repo: "rladies/starter-kit"
+  gh_id: !r Sys.getenv("API_KEY_GITHUB_ID")
+  gh_secret: !r Sys.getenv("API_KEY_GITHUB_SECRET")
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r includes, message = FALSE}
+library(data.table)
+library(dplyr)
+library(igraph)
+library(stringr)
+library(tidyr)
+library(visNetwork)
+library(httr)
+library(jsonlite)
+```
+
+Clone the repository if you haven't already.
+
+```{r}
+# Clone the repo into the data directory for this project
+paste0("git clone ", getwd(),'/', params$git_path, "/", params$git_repo)
+
+# Get the current SHA and update the params
+params$gitlog_sha <- system(paste0("cd ../", params$git_path, "/", params$git_repo, 
+                                   "; git rev-parse HEAD"),  intern = TRUE)
+```
+
+
+```{r git_log}
+
+git_log_cmd <- paste0('cd ../', params$git_path,"/", params$git_repo, 
+                     '; git log ', params$gitlog_sha, 
+                     #' --no-merges ',
+                     ' --date=short --pretty=tformat:"%ad|%an|%ae|%h" > ', "../", params$gitlog_out)
+system(git_log_cmd)
+
+git_log_cmd
+```
+
+
+```{r gitlog_raw}
+
+gitlog_raw <- read.csv(paste0("../", params$git_path, "/", params$gitlog_out), 
+                       header = FALSE, sep = "|", quote="",
+                     col.names=c("git_log_date", "name", "email", "sha"),
+                   stringsAsFactors = FALSE)
+
+# fix names and emails to be all lowercase
+gitlog_emails <- gitlog_raw %>% 
+  mutate(
+         name=str_to_lower(name),
+         email=str_to_lower(email)) %>% 
+  rename(commit_date=git_log_date) %>%
+  select(commit_date, name, email, sha)
+```
+
+
+```{r authors_by_email}
+
+# add an entry to split out username for github email addresses
+# this is the github username and might be reused as a name in another commit
+
+gh_authors_by_email <- gitlog_emails %>%
+  arrange(desc(commit_date)) %>%
+  group_by(email, name) %>%
+  summarise(num_commits = n(), 
+            last_commit=max(commit_date)) %>%
+  arrange(desc(last_commit)) 
+
+gh_authors_email_names <- gh_authors_by_email %>%
+  separate(email, c("email_name", "email_host"), sep="@", remove=FALSE) %>%
+  mutate(name = email_name) %>%
+  filter(name != email_name) %>%
+  select(-email_host,-email_name)
+
+gh_authors_by_email <- bind_rows(gh_authors_by_email, gh_authors_email_names)
+
+gh_authors_join1 <- gh_authors_by_email %>%
+  inner_join(gh_authors_by_email %>% select(name, email) %>% rename(name2=name), "email") %>%
+  unique()
+
+gh_authors_join <- gh_authors_join1 %>%
+  inner_join(gh_authors_join1 %>% select(name, email) %>% rename(email2=email), "name") %>%
+  unique()
+
+gh_authors_emails <- gh_authors_join %>%
+  select(email, email2) %>%
+  unique()
+```
+
+```{r authors_graph}
+# this might need to be directed in the future based on commit dates
+gh_authors_emails_graph <- graph_from_data_frame(gh_authors_emails, 
+                                          directed=FALSE,
+                                          vertices=unique(gh_authors_emails$email2))
+
+E(gh_authors_emails_graph)$weight <- 1
+gh_emails_graph <- simplify(gh_authors_emails_graph, 
+                            edge.attr.comb=list(
+                              weight = "sum", transaction_amount = "sum", function(x)length(x)))
+
+# identify clusters
+gh_emails_networks <- clusters(as.undirected(gh_emails_graph))
+V(gh_emails_graph)$network <- gh_emails_networks$membership
+
+gh_emails_nodes <- get.data.frame(gh_emails_graph, what="vertices")
+gh_emails_lookup <- gh_emails_nodes %>% select(name, network) %>% rename(email=name)
+
+# join with network id
+gitlog_networks <- merge(gitlog_emails,
+                            gh_emails_lookup,
+                            by="email")
+
+paste("identified", max(gitlog_networks$network),"unique authors from", n_distinct(gh_emails_lookup$email),"emails")
+```
+
+
+
+```{r test_df}
+test_df <- gh_authors_emails
+
+test_df_graph <- graph_from_data_frame(test_df, 
+                                          directed=FALSE,
+                                          vertices=unique(test_df$email2))
+
+E(test_df_graph)$weight <- 1
+test_df_graph2 <- simplify(test_df_graph, 
+                            edge.attr.comb=list(
+                              weight = "sum", transaction_amount = "sum", function(x)length(x)))
+
+# identify clusters
+test_df_networks <- clusters(as.undirected(test_df_graph2))
+V(test_df_graph2)$network <- test_df_networks$membership
+
+test_df_nodes <- get.data.frame(test_df_graph2, what="vertices")
+
+test_df_nodes <- data.frame(id = test_df_nodes$name, 
+                               title = test_df_nodes$name, 
+                               group = test_df_nodes$network)
+
+test_df_nodes <- test_df_nodes[order(test_df_nodes$id, decreasing = F),]
+
+test_df_edges <- get.data.frame(test_df_graph2, what="edges")[1:2]
+
+visNetwork(test_df_nodes, test_df_edges) %>%
+  visOptions(highlightNearest = TRUE, nodesIdSelection = TRUE)
+```
+
+Compare with Github
+
+
+```{r gh_api_commits, eval=FALSE}
+url <- paste0("https://api.github.com/repos/", params$gh_repo, "/commits")
+
+query_params <- list(
+  client_id=params$gh_id, 
+  client_secret=params$gh_secret, 
+  per_page=100)
+
+get_gh_commits <- function (url, query) {
+  req <- GET(url, query=query)
+  print(paste(req$url))
+  json <- content(req, as = "text")
+  commits <- fromJSON(json, flatten=TRUE)
+  return(commits)
+}
+
+commits_dir <- paste0("../", params$git_path, "/", params$git_repo, "_commits")
+system(paste("mkdir", commits_dir))
+
+num_commits <- as.numeric(system(paste0('cd ../', params$git_path,"/", params$git_repo, 
+                     "; git rev-list HEAD --count"), 
+                     intern = TRUE))
+pages <- ceiling(num_commits/100)
+
+commits <- data_frame()
+for (n in 1:pages) {
+  print(paste("Getting commits for page:", n))
+  new_commits <- get_gh_commits(url, append(query_params, c(page=n)))
+  commits <- bind_rows(commits, new_commits)
+  saveRDS(new_commits, paste0(commits_dir, "/_commits_", n, ".rds"))
+}
+commits <- commits %>% mutate(sha_long=sha, sha = str_sub(sha_long, 1, 7))
+saveRDS(commits, paste0("../", params$git_path, "/", params$git_repo, "_commits.rds"))
+```
+
+```{r, check_api_commits}
+commits <-readRDS(paste0("../", params$git_path, "/", params$git_repo, "_commits.rds"))
+
+commits_github_na_login <- commits %>% filter(is.na(author.login))
+commits_github_login <- commits %>% filter(!is.na(author.login))
+
+print(paste("Authors identified by us:", max(gitlog_networks$network)))
+print(paste("Authors identified by Github:", length(unique(commits_github_login$author.login))))
+print(paste("Authors not counted by Github:", length(unique(commits_github_na_login$commit.author.email))))
+
+commits_check <- commits %>% 
+  select(sha, author.login, commit.author.name, commit.author.email) %>% 
+  inner_join(gitlog_networks, by="sha") %>%
+  rename(gh_login=author.login)
+
+# did we identify authors that github didn't?
+commits_check <- commits_check %>% 
+  group_by(network) %>%
+  mutate(emails_per_network=n_distinct(email))
+
+gh_na <- commits_check %>%
+  filter(is.na(gh_login)) %>%
+  select(network, name, email, emails_per_network) %>%
+  unique()
+gh_na
+
+# did we identify any authors as multiple that github counted as one?
+commits_check <- commits_check %>%
+  group_by(gh_login) %>%
+  mutate(networks_per_login=n_distinct(network))
+
+authors_multi_by_us <- commits_check %>% 
+  filter(!is.na(gh_login), networks_per_login > 1) %>% 
+  select(network, gh_login, name, email)
+
+print(paste("Authors we counted more than once: ", nrow(authors_multi_by_us)/2))
+authors_multi_by_us
+
+# did we identify authors as one that github counted as multiple?
+commits_check <- commits_check %>%
+  group_by(network) %>%
+  mutate(logins_per_network=n_distinct(gh_login, na.rm=TRUE))
+
+authors_multi_by_them <- commits_check %>% 
+  filter(logins_per_network > 1) %>% 
+  select(network, gh_login, logins_per_network) %>%
+  unique()
+
+print(paste("Authors they counted more than once: ", nrow(authors_multi_by_them)))
+authors_multi_by_them
+
+commits_check <- commits_check %>%
+  group_by(network) %>%
+  mutate(network_has_na_login=any(is.na(gh_login)))
+
+gh_login_na <- commits_check %>%
+  filter(network_has_na_login, logins_per_network > 0) %>%
+  select(network, gh_login, logins_per_network, emails_per_network) %>%
+  unique() %>%
+  filter(!is.na(gh_login))
+
+print(paste("Authors we connected to another Github login: ", nrow(gh_login_na)))
+gh_login_na 
+
+# github has 24 (counting un-id'ed authors - 26)
+# we have 26
+# extras: 1 author we identified 2x + (2 authors we counted that github didn't - 1 we associated with another github login = 1)
+# manual review - the extra author is already counted in github
+# consolidation using gh_api gives us 1 extra author
+
+```
+
+TODO: run these against a sample of popular repos to get an idea of how far off we are with this method.
+
+
+
+
+
+
+
