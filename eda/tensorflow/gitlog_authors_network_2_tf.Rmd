@@ -10,8 +10,6 @@ params:
   gitlog_sha: ''
   gitlog_out: 'tensorflow_tensorflow.txt'
   gh_repo: "tensorflow/tensorflow"
-  gh_id: !r Sys.getenv("API_KEY_GITHUB_ID")
-  gh_secret: !r Sys.getenv("API_KEY_GITHUB_SECRET")
 ---
 
 ```{r setup, include=FALSE}
@@ -32,21 +30,21 @@ library(urltools)
 
 Clone the repository if you haven't already.
 
-```{r}
+```{r, eval=FALSE}
 # Clone the repo into the data directory for this project
 paste0("git clone ", params$git_url, " ", getwd(),'/', params$git_path, "/", params$git_repo)
 
 # Get the current SHA and update the params
-params$gitlog_sha <- system(paste0("cd ", params$git_path, "/", params$git_repo, 
+gitlog_sha <- system(paste0("cd ", params$git_path, "/", params$git_repo, 
                                    "; git rev-parse HEAD"),  intern = TRUE)
 ```
 
 # Get Git Commit Log
 
-```{r git_log}
+```{r git_log, eval=FALSE}
 
 git_log_cmd <- paste0('cd ', params$git_path,"/", params$git_repo, 
-                     '; git log ', params$gitlog_sha, 
+                     '; git log ', gitlog_sha, 
                      #' --no-merges ',
                      ' --date=short --pretty=tformat:"%ad|%an|%ae|%h" > ', "../", params$gitlog_out)
 system(git_log_cmd)
