@@ -1,0 +1,199 @@
+---
+title: "Git Log Authors Network Experiment 2 (Tensorflow)"
+author: "Augustina Ragwitz"
+date: "September 27, 2017"
+output: html_document
+params:
+  git_url: "git@github.com:tensorflow/tensorflow.git"
+  git_repo: "tensorflow"
+  git_path: "data/gitlog_authors_2_tf"
+  gitlog_sha: ''
+  gitlog_out: 'tensorflow_tensorflow.txt'
+  gh_repo: "tensorflow/tensorflow"
+  gh_id: !r Sys.getenv("API_KEY_GITHUB_ID")
+  gh_secret: !r Sys.getenv("API_KEY_GITHUB_SECRET")
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r includes, message = FALSE}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(scales)
+library(stringr)
+library(tidyr)
+library(urltools)
+```
+
+# Setup
+
+Clone the repository if you haven't already.
+
+```{r}
+# Clone the repo into the data directory for this project
+paste0("git clone ", params$git_url, " ", getwd(),'/', params$git_path, "/", params$git_repo)
+
+# Get the current SHA and update the params
+params$gitlog_sha <- system(paste0("cd ", params$git_path, "/", params$git_repo, 
+                                   "; git rev-parse HEAD"),  intern = TRUE)
+```
+
+# Get Git Commit Log
+
+```{r git_log}
+
+git_log_cmd <- paste0('cd ', params$git_path,"/", params$git_repo, 
+                     '; git log ', params$gitlog_sha, 
+                     #' --no-merges ',
+                     ' --date=short --pretty=tformat:"%ad|%an|%ae|%h" > ', "../", params$gitlog_out)
+system(git_log_cmd)
+
+git_log_cmd
+```
+
+# Prepare Commit Log
+
+Extract hostnames for company affiliation and convert to Tibbletime for date analysis.
+
+```{r email_providers}
+email_providers <- c("126",
+                     "163",
+                     "github",
+                     "gmail",
+                     "googlemail",
+                     "hotmail",
+                     "live",
+                     "me",
+                     "naver",
+                     "outlook",
+                     "qq",
+                     "yahoo")
+```
+
+```{r gitlog_raw}
+
+gitlog_raw <- read.csv(paste0(params$git_path, "/", params$gitlog_out), 
+                       header = FALSE, sep = "|", quote="",
+                     col.names=c("git_log_date", "name", "email", "sha"),
+                   stringsAsFactors = FALSE)
+
+# fix names and emails to be all lowercase
+gitlog_commits <- gitlog_raw %>% 
+  mutate(
+         name=str_to_lower(name),
+         email=str_to_lower(email)) %>% 
+  rename(commit_date=git_log_date) %>%
+  separate(email, c("username", "host"), sep="@", remove=FALSE) %>%
+  mutate(domain=suffix_extract(host)$domain,
+         suffix=suffix_extract(host)$suffix,
+         is_edu=str_detect(suffix, "edu")|str_detect(suffix, "ac."),
+         commit_date=ymd(commit_date),
+         commit_year=year(commit_date),
+         commit_month=month(commit_date),
+         commit_week=week(commit_date),
+         hosted_email=domain %in% email_providers)
+
+gitlog_commits <- gitlog_commits %>%
+  group_by(domain) %>%
+  mutate(first_commit_age=as.numeric(ymd("2017-10-01") - min(commit_date)))
+```
+
+
+# Host Summaries
+
+Summarize activity by host for different periods of time.
+
+```{r commits_by_day}
+
+commits_day <- gitlog_commits %>%
+  group_by(commit_date, domain) %>%
+  summarise(num_commits=n(), 
+            is_edu=first(is_edu), 
+            hosted_email=first(hosted_email), 
+            first_commit_age=first(first_commit_age))
+
+```
+
+```{r commits_by_week}
+
+commits_week <- gitlog_commits %>%
+  group_by(commit_year, commit_week, domain) %>%
+  summarise(num_commits=n(), 
+            is_edu=first(is_edu), 
+            hosted_email=first(hosted_email),
+            first_commit_age=first(first_commit_age))
+
+```
+
+
+```{r commits_by_month}
+
+commits_month <- gitlog_commits %>%
+  group_by(commit_year, commit_month, domain) %>%
+  summarise(num_commits=n(), 
+            has_commits=1, 
+            is_edu=first(is_edu), 
+            hosted_email=first(hosted_email),
+            first_commit_age=first(first_commit_age)) %>%
+  mutate(commit_month_str=ifelse(commit_month > 9, 
+                                 paste0(commit_year, "-", commit_month), 
+                                 paste0(commit_year, "-", 0, commit_month))) %>%
+  group_by(domain) %>%
+  mutate(total_commit_months=n_distinct(commit_month_str)) 
+
+```
+
+# Plots
+
+Visual plots of activity by host over different periods of time.
+
+```{r plot_commits_month}
+
+commits_month_filtered <- commits_month %>%
+  filter(!is_edu, !hosted_email,
+         !domain %in% c("google", "tensorflow", "petewarden", "vomjom", "babuschk", "naml"))
+
+ggplot(commits_month_filtered %>% 
+         filter(total_commit_months > 6), 
+       aes(x=commit_month_str, y=has_commits)) + 
+  geom_bar(stat="identity", aes(fill=reorder(domain, -total_commit_months))) +
+  theme(axis.text.x=element_text(angle = 90, hjust = 1)) +
+  guides(fill=guide_legend(title="Company (>6 months)")) +
+  xlab("Month") +
+  ylab("Has Tensorflow Commit")
+
+ggplot(commits_month_filtered %>% 
+         filter(total_commit_months > 6) %>%
+         summarise(total_commit_months=first(total_commit_months)), 
+       aes(x=reorder(domain, -total_commit_months), y=total_commit_months)) + 
+  geom_bar(stat="identity", aes(fill=domain), show.legend=FALSE) +
+  theme(axis.text.x=element_text(angle = 90, hjust = 1)) +
+  xlab("Company (Non-Google, > 6 months)") +
+  ylab("Months w/ Tensorflow Commit") +
+  scale_y_continuous(breaks=pretty_breaks())
+
+ggplot(commits_month_filtered %>% 
+         filter(total_commit_months > 6) %>%
+         summarise(first_commit_age=first(first_commit_age)), 
+       aes(x=reorder(domain, -first_commit_age), y=first_commit_age)) + 
+  geom_bar(stat="identity", aes(fill=domain), show.legend=FALSE) +
+  theme(axis.text.x=element_text(angle = 90, hjust = 1)) +
+  xlab("Company (Non-Google, > 6 months)") +
+  ylab("Days Since First Tensorflow Commit")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
