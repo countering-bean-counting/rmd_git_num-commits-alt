@@ -163,6 +163,8 @@ ggplot(commits_month_filtered %>%
   xlab("Month") +
   ylab("Has Tensorflow Commit")
 
+ggsave("output/tf_commit_rolling_month.png")
+
 ggplot(commits_month_filtered %>% 
          filter(total_commit_months > 6) %>%
          summarise(total_commit_months=first(total_commit_months)), 
@@ -173,6 +175,8 @@ ggplot(commits_month_filtered %>%
   ylab("Months w/ Tensorflow Commit") +
   scale_y_continuous(breaks=pretty_breaks())
 
+ggsave("output/tf_commit_months.png")
+
 ggplot(commits_month_filtered %>% 
          filter(total_commit_months > 6) %>%
          summarise(first_commit_age=first(first_commit_age)), 
@@ -181,6 +185,8 @@ ggplot(commits_month_filtered %>%
   theme(axis.text.x=element_text(angle = 90, hjust = 1)) +
   xlab("Company (Non-Google, > 6 months)") +
   ylab("Days Since First Tensorflow Commit")
+
+ggsave("output/first_tf_commit_days.png")
 
 ```
 
